@@ -1,0 +1,5 @@
+{
+  "name": "FeatureVote",
+  "description": "A community-driven feature request and upvoting platform powered by Firebase and enhanced with Gemini AI for request polishing.",
+  "requestFramePermissions": []
+}
