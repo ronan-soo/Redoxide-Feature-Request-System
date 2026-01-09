@@ -12,7 +12,16 @@ import {
   query,
   Firestore
 } from 'firebase/firestore';
-import { getAuth, signInAnonymously, Auth } from 'firebase/auth';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  signInWithPopup, 
+  GoogleAuthProvider,
+  signOut,
+  onAuthStateChanged,
+  Auth,
+  User
+} from 'firebase/auth';
 import { FeatureRequest } from '../types';
 
 const firebaseConfig = {
@@ -30,9 +39,9 @@ let db: Firestore | undefined;
 let auth: Auth | undefined;
 
 // Helper to check if initialized
-export const isFirebaseInitialized = () => !!app && !!db;
+export const isFirebaseInitialized = () => !!app && !!db && !!auth;
 
-export const initializeFirebase = async (): Promise<string | null> => {
+export const initializeFirebase = (): boolean => {
   try {
     if (!getApps().length) {
       app = initializeApp(firebaseConfig);
@@ -42,20 +51,35 @@ export const initializeFirebase = async (): Promise<string | null> => {
     
     db = getFirestore(app);
     auth = getAuth(app);
-
-    // Sign in anonymously to handle security rules that require auth
-    try {
-      const userCredential = await signInAnonymously(auth);
-      console.log("Firebase Auth: Signed in as", userCredential.user.uid);
-      return userCredential.user.uid;
-    } catch (authError) {
-      console.error("Firebase Auth failed:", authError);
-      return null; 
-    }
-
+    return true;
   } catch (error) {
     console.error("Firebase initialization failed:", error);
-    return null;
+    return false;
+  }
+};
+
+export const subscribeToAuthChanges = (callback: (user: User | null) => void) => {
+  if (!auth) return () => {};
+  return onAuthStateChanged(auth, callback);
+};
+
+export const signInWithGoogle = async () => {
+  if (!auth) return;
+  const provider = new GoogleAuthProvider();
+  try {
+    await signInWithPopup(auth, provider);
+  } catch (error) {
+    console.error("Error signing in with Google:", error);
+    throw error;
+  }
+};
+
+export const logOut = async () => {
+  if (!auth) return;
+  try {
+    await signOut(auth);
+  } catch (error) {
+    console.error("Error signing out:", error);
   }
 };
 
@@ -69,10 +93,8 @@ export const subscribeToFeatures = (
   }
 
   const q = query(collection(db, 'features'));
-  console.log("Subscribing to 'features' collection...");
   
   return onSnapshot(q, (snapshot) => {
-    console.log(`Firestore Update: Received ${snapshot.docs.length} documents.`);
     const features = snapshot.docs.map(doc => ({
       id: doc.id,
       ...doc.data()
@@ -89,6 +111,12 @@ export const addFeatureRequest = async (title: string, description: string): Pro
     console.error("Firestore DB not initialized");
     return false;
   }
+  // Check if user is logged in (optional, but good practice to ensure rules pass)
+  if (!auth?.currentUser) {
+    alert("You must be signed in to submit a request.");
+    return false;
+  }
+
   try {
     await addDoc(collection(db, 'features'), {
       title,
@@ -96,7 +124,9 @@ export const addFeatureRequest = async (title: string, description: string): Pro
       createdAt: Date.now(),
       upvotes: 0,
       upvotedBy: [],
-      status: 'open'
+      status: 'open',
+      createdBy: auth.currentUser.uid, // Track who created it
+      authorName: auth.currentUser.displayName || 'Anonymous'
     });
     return true;
   } catch (e) {
@@ -126,6 +156,6 @@ export const toggleUpvote = async (featureId: string, userId: string, hasUpvoted
     }
   } catch (e) {
     console.error("Error updating upvote: ", e);
-    alert("Failed to update vote. Please check your connection.");
+    alert("Failed to update vote. Please check your connection or sign in.");
   }
 };

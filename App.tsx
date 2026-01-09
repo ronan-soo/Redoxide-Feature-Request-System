@@ -1,49 +1,48 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { v4 as uuidv4 } from 'uuid';
-import { MessageSquarePlus, Trophy, Clock, AlertTriangle } from 'lucide-react';
+import { MessageSquarePlus, Trophy, Clock, AlertTriangle, LogOut, User as UserIcon, LogIn } from 'lucide-react';
+import { User } from 'firebase/auth';
 
 import { FeatureRequest, SortOption } from './types';
-import { initializeFirebase, subscribeToFeatures, addFeatureRequest, toggleUpvote, isFirebaseInitialized } from './services/firebase';
+import { 
+  initializeFirebase, 
+  subscribeToFeatures, 
+  addFeatureRequest, 
+  toggleUpvote, 
+  isFirebaseInitialized,
+  signInWithGoogle,
+  logOut,
+  subscribeToAuthChanges
+} from './services/firebase';
 import { FeatureCard } from './components/FeatureCard';
 import { SubmitModal } from './components/SubmitModal';
 import { Button } from './components/Button';
 
-// Local Storage Keys
-const USER_ID_KEY = 'feature_vote_user_id';
-
 export default function App() {
-  const [userId, setUserId] = useState<string>('');
+  const [user, setUser] = useState<User | null>(null);
   const [features, setFeatures] = useState<FeatureRequest[]>([]);
   const [sortBy, setSortBy] = useState<SortOption>(SortOption.POPULAR);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Initialize App
+  // Initialize App and Auth
   useEffect(() => {
     const init = async () => {
-      // 1. Initialize Firebase (Async with Auth)
-      const authUserId = await initializeFirebase();
+      initializeFirebase();
       
-      // 2. Set User ID (prefer Auth UID, fallback to local UUID)
-      if (authUserId) {
-        setUserId(authUserId);
-        // Clean up local storage if we have a real auth ID
-        localStorage.removeItem(USER_ID_KEY); 
-      } else {
-        // Fallback for offline or auth failure
-        let storedUserId = localStorage.getItem(USER_ID_KEY);
-        if (!storedUserId) {
-          storedUserId = uuidv4();
-          localStorage.setItem(USER_ID_KEY, storedUserId);
-        }
-        setUserId(storedUserId);
-      }
-      
-      setIsLoading(false);
+      // Listen for auth changes
+      const unsubscribeAuth = subscribeToAuthChanges((currentUser) => {
+        setUser(currentUser);
+        setIsLoading(false);
+      });
+
+      return () => unsubscribeAuth();
     };
 
-    init();
+    const cleanup = init();
+    return () => {
+      // We can't await the cleanup of init, but we can handle unmounting logic if needed
+    };
   }, []);
 
   // Listen to Features
@@ -60,7 +59,14 @@ export default function App() {
       (err) => {
         console.error("Subscription failed:", err);
         if (err.message.includes("permission-denied")) {
-          setError("Access denied. Please check your Firestore Security Rules to allow read/write.");
+          // If permission denied and not logged in, it's likely because rules require auth
+          if (!user) {
+             // We don't show a huge error here, we just might not show data or show a specific message
+             // but usually read access is public in these apps. 
+             // If rules require auth for read, we set error.
+             // For now, let's assume public read, auth write.
+          }
+          setError("Access denied. Please check your Firestore Security Rules.");
         } else {
           setError("Failed to load features. Please check your connection.");
         }
@@ -68,7 +74,7 @@ export default function App() {
     );
 
     return () => unsubscribe();
-  }, [isLoading]);
+  }, [isLoading, user]);
 
   // Derived state for sorted features
   const sortedFeatures = useMemo(() => {
@@ -82,11 +88,22 @@ export default function App() {
   }, [features, sortBy]);
 
   const handleSubmitFeature = async (title: string, description: string) => {
-    const success = await addFeatureRequest(title, description);
-    if (!success) {
-      // If add fails but we don't have a global error yet, it might be permissions
-      // We rely on the internal alert in addFeatureRequest for now, but could update state here
+    if (!user) {
+      signInWithGoogle();
+      return;
     }
+    await addFeatureRequest(title, description);
+  };
+
+  const handleVote = (featureId: string, hasUpvoted: boolean) => {
+    if (!user) {
+      const confirmLogin = window.confirm("You need to sign in to vote. Sign in with Google?");
+      if (confirmLogin) {
+        signInWithGoogle();
+      }
+      return;
+    }
+    toggleUpvote(featureId, user.uid, hasUpvoted);
   };
 
   if (isLoading) return <div className="flex items-center justify-center h-screen text-primary font-medium">Connecting to FeatureVote...</div>;
@@ -105,10 +122,44 @@ export default function App() {
               <p className="text-xs text-gray-500 mt-1">Community Roadmap</p>
             </div>
           </div>
+          
           <div className="flex items-center gap-3">
-            <Button onClick={() => setIsModalOpen(true)}>
+            {user ? (
+              <div className="flex items-center gap-3 bg-gray-50 pl-3 pr-2 py-1.5 rounded-full border border-gray-100">
+                <div className="flex items-center gap-2">
+                  {user.photoURL ? (
+                    <img 
+                      src={user.photoURL} 
+                      alt={user.displayName || "User"} 
+                      className="w-6 h-6 rounded-full border border-gray-200"
+                    />
+                  ) : (
+                    <UserIcon size={16} className="text-gray-500" />
+                  )}
+                  <span className="text-sm font-medium text-gray-700 hidden sm:inline">
+                    {user.displayName?.split(' ')[0] || 'User'}
+                  </span>
+                </div>
+                <div className="w-px h-4 bg-gray-300 mx-1"></div>
+                <button 
+                  onClick={logOut}
+                  className="p-1 hover:bg-gray-200 rounded-full text-gray-500 hover:text-red-600 transition-colors"
+                  title="Sign Out"
+                >
+                  <LogOut size={16} />
+                </button>
+              </div>
+            ) : (
+              <Button onClick={() => signInWithGoogle()} variant="secondary" className="px-3 py-1.5 text-sm">
+                <LogIn size={16} className="mr-2" />
+                Sign In
+              </Button>
+            )}
+
+            <Button onClick={() => user ? setIsModalOpen(true) : signInWithGoogle()}>
               <MessageSquarePlus size={18} className="mr-2" />
-              Request Feature
+              <span className="hidden sm:inline">Request Feature</span>
+              <span className="sm:hidden">Request</span>
             </Button>
           </div>
         </div>
@@ -170,9 +221,9 @@ export default function App() {
               </div>
               <h3 className="text-lg font-medium text-gray-900">No features yet</h3>
               <p className="text-gray-500 mt-1">Be the first to request a new feature!</p>
-              {!error && (
-                <p className="text-xs text-gray-400 mt-4">
-                  (If you added data, check if your Firestore collection is named "features")
+              {!user && (
+                <p className="text-sm text-primary mt-4 cursor-pointer hover:underline" onClick={() => signInWithGoogle()}>
+                  Sign in to get started
                 </p>
               )}
             </div>
@@ -181,8 +232,8 @@ export default function App() {
               <FeatureCard
                 key={feature.id}
                 feature={feature}
-                userId={userId}
-                onToggleUpvote={(id, hasUpvoted) => toggleUpvote(id, userId, hasUpvoted)}
+                userId={user?.uid || ''}
+                onToggleUpvote={handleVote}
               />
             ))
           )}
